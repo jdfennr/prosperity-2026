@@ -6,7 +6,7 @@ Prosperity 4 is an online trading contest set in a simulated trading environment
 
 ## Phase 1
 
-This round had two products to trade. Profiting from these products required market-making strategies. The best strategies accurately estimate a fair midprice around which to trade. That meant handling cases like an emptying orderbook and separating noisy offers from prices anchored to fair value. I focused on a midprice that stayed stable under noise and regime shifts by leaning on orderbook history when liquidity dried up or reference prices disappeared.
+This round had two products to trade and profiting from these products required market-making strategies. The best strategies accurately estimate a fair midprice around which to trade. That meant handling cases like an emptying orderbook and separating noisy offers from prices anchored to fair value. I focused on a midprice that stayed stable under noise and regime shifts by leaning on orderbook history when liquidity dried up or reference prices disappeared.
 
 ## Phase 1 — result
 
