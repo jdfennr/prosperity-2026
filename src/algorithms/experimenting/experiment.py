@@ -47,7 +47,7 @@ class Product:
     
     
     def bid(self, price, volume, logging=True):
-        int_price = int(price)        
+        int_price = int(price)          # truncate: never bid above intended price
         abs_volume = min(abs(int(volume)), self.available_buy)
         if abs_volume <= 0: return
         order = Order(self.name, int_price, abs_volume)
@@ -56,7 +56,7 @@ class Product:
         self.orders.append(order)
 
     def ask(self, price, volume, logging=True):
-        int_price = math.ceil(price)     
+        int_price = math.ceil(price)     # ceil: never ask below intended price
         abs_volume = min(abs(int(volume)), self.available_sell)
         if abs_volume <= 0: return
         order = Order(self.name, int_price, -abs_volume)
@@ -97,6 +97,7 @@ class Product:
         return highest_bid, lowest_ask
         
     def get_wall(self, volume_min):
+        
         buy_orders, sell_orders = self.buy_order_depth, self.sell_order_depth
         mid, ceiling, floor = None, None, None
         
@@ -121,7 +122,7 @@ class Product:
         
     def get_order_depths(self):
         od = self.state.order_depths.get(self.name)
-        if not od:
+        if od is None:
             return {}, {}
         buy_orders, sell_orders = {}, {}
         if od.buy_orders:
@@ -132,10 +133,13 @@ class Product:
             except: pass
 
         return buy_orders, sell_orders
+    
+    def _wall_keys(self):
+        return f"{self.name}_BWAP", f"{self.name}_AWAP"
   
     def wall_history(self, window):
-        bk, ak = f"{self.name}_BWAP", f"{self.name}_AWAP"
         
+        bk, ak = self._wall_keys()
         bwap = list(self.last_traderData.get(bk, []))
         awap = list(self.last_traderData.get(ak, []))
         
@@ -143,10 +147,10 @@ class Product:
             window = 1
             
         if self.wall_floor is not None:
-            bwap.append(round(self.wall_floor))
+            bwap.append(int(self.wall_floor))
             
         if self.wall_ceiling is not None:
-            awap.append(round(self.wall_ceiling))
+            awap.append(int(self.wall_ceiling))
             
         while len(bwap) > window:
             bwap.pop(0)
@@ -172,46 +176,46 @@ class StaticTrader(Product):
         
 
     def get_orders(self):
-        """ Simple market making with. Bids/asks at +-95 around mid when the orderbook dries up on either side 
-            to capture extra profit """
-        
+        # taking
+ #       if not self.buy_order_depth:
         if self.wall_vwap:
-            # taking ask side
             for sp, sv in self.sell_order_depth.items():
-                if sp < self.variable_mid:
+                ev = ((self.anchor_mid - sp) + (self.variable_mid - sp) * 3) / 4
+                if ev > 0:
                     self.bid(sp, sv, logging=False)
-                elif sp <= self.variable_mid and self.initial_position < 0:
+                elif sp <= self.variable_mid and sp < self.anchor_mid:
                     self.bid(sp, min(sv, abs(self.initial_position)), logging=False)
 
-            # taking bid side
             for bp, bv in self.buy_order_depth.items():
-                if bp > self.variable_mid:
+                ev = ((bp - self.anchor_mid) + (bp - self.variable_mid) * 3) / 4
+                if ev > 0:
                     self.ask(bp, bv, logging=False)
-                elif bp >= (self.variable_mid) and self.initial_position > 0:
+                elif bp >= (self.variable_mid) and bp > self.anchor_mid:
                     self.ask(bp, min(bv, self.initial_position), logging=False)
-
-            # MM bid side 
+        
+        if self.wall_vwap:
             bid_price = self.variable_mid - 95
             for bp, bv in self.buy_order_depth.items():
                 overbidding_price = bp + 1
-                
-                if bv > 1 and overbidding_price < self.variable_mid:
+                ev = ((self.anchor_mid - overbidding_price) + (self.variable_mid - overbidding_price) * 3) / 4
+                if bv > 1 and ev > 0:
                     bid_price = max(bid_price, overbidding_price)
                     break
-                elif bp < self.variable_mid:
+                elif bp < self.variable_mid and bp < self.anchor_mid:
                     bid_price = max(bid_price, bp)
                     break
                 
             self.bid(bid_price, self.available_buy)
             
-            # MM ask side
+        if self.wall_vwap:
             ask_price = self.variable_mid + 95
             for sp, sv in self.sell_order_depth.items():
                 underbidding_price = sp - 1
-                if sv > 1 and underbidding_price > self.variable_mid:
+                ev = ((underbidding_price - self.anchor_mid) + (underbidding_price - self.variable_mid) * 3) / 4
+                if sv > 1 and ev > 0:
                     ask_price = min(ask_price, underbidding_price)
                     break
-                elif sp > self.variable_mid:
+                elif sp > self.variable_mid and sp > self.anchor_mid:
                     ask_price = min(ask_price, sp)
                     break
 
@@ -226,50 +230,7 @@ class DriftTrader(Product):
         self.drift_mid = state.timestamp * .001 + 13000     
         self.dynamic_mid = self.safe_mid()
         self.a_floor = self.ask_floor(LOWASK_WINDOW)
-    
-    def get_orders(self):
-        """ Ride the asset's upward drift: stay maximally long, only sell into a wide spread, 
-            and buy the inventory back as soon as the market crosses our mid. """
-        
-        if self.dynamic_mid:
-            # initial buying to capture full upward asset drift
-            if self.initial_position < 80 and self.state.timestamp < 10000:
-                for sp, sv in self.sell_order_depth.items():
-                    if self.a_floor is not None and sp < (self.dynamic_mid + self.a_floor - 2):
-                        self.bid(sp, sv, logging=False)
-                    
-            # taking orders to reset back to max position        
-            for sp, sv in self.sell_order_depth.items():
-                if sp < self.dynamic_mid + 1:
-                    self.bid(sp, sv, logging=False)
-                elif sp <= self.dynamic_mid and self.initial_position < 0:
-                    self.bid(sp, min(sv, abs(self.initial_position)), logging=False)
-        
-            # standard MM bid side
-            bid_price = self.dynamic_mid - 95
-            for bp, bv in self.buy_order_depth.items():
-                overbidding_price = bp + 1
-                if bv > 1 and overbidding_price < self.dynamic_mid:
-                    bid_price = max(bid_price, overbidding_price)
-                    break
-                elif bp < self.dynamic_mid:
-                    bid_price = max(bid_price, bp)
-                    break
-                
-            self.bid(bid_price, self.available_buy)
-            
-            # standard MM ask side, only done at max position
-            ask_price = self.dynamic_mid + 95
-            for sp, sv in self.sell_order_depth.items():
-                underbidding_price = sp - 1
-                if self.a_floor is not None and sv > 1 and underbidding_price > (self.dynamic_mid + self.a_floor - 3) and self.initial_position > 79:
-                    ask_price = min(ask_price, underbidding_price)
-                    break
 
-            self.ask(ask_price, 5)       
-
-        return {self.name: self.orders}
-    
     def safe_mid(self):
         residual_max = 1
         if self.wall_vwap is None:
@@ -279,6 +240,7 @@ class DriftTrader(Product):
         return self.wall_vwap
     
     def ask_floor(self, window):
+        
         ask_floor = list(self.last_traderData.get("ASK_FLOOR", []))
         
         if window < 1:
@@ -292,6 +254,47 @@ class DriftTrader(Product):
 
         self.new_trader_data["ASK_FLOOR"] = ask_floor
         return min(ask_floor) if ask_floor else None
+            
+
+    
+    def get_orders(self):
+        
+        if self.dynamic_mid:
+            if self.initial_position < 80 and self.state.timestamp < 10000:
+                for sp, sv in self.sell_order_depth.items():
+                    if self.a_floor is not None and sp < (self.dynamic_mid + self.a_floor - 2):
+                        self.bid(sp, sv, logging=False)
+                    
+        if self.dynamic_mid:
+            for sp, sv in self.sell_order_depth.items():
+                if sp < self.dynamic_mid + 1:
+                    self.bid(sp, sv, logging=False)
+
+        
+        if self.dynamic_mid:
+            bid_price = self.dynamic_mid - 95
+            for bp, bv in self.buy_order_depth.items():
+                overbidding_price = bp + 1
+                if bv > 1 and overbidding_price < self.dynamic_mid:
+                    bid_price = max(bid_price, overbidding_price)
+                    break
+                elif bp < self.dynamic_mid:
+                    bid_price = max(bid_price, bp)
+                    break
+                
+            self.bid(bid_price, self.available_buy)
+            
+        if self.dynamic_mid:
+            ask_price = self.dynamic_mid + 95
+            for sp, sv in self.sell_order_depth.items():
+                underbidding_price = sp - 1
+                if self.a_floor is not None and sv > 1 and underbidding_price > (self.dynamic_mid + self.a_floor - 4) and self.initial_position > 79:
+                    ask_price = min(ask_price, underbidding_price)
+                    break
+
+            self.ask(ask_price, 5)       
+
+        return {self.name: self.orders}
     
 
 class Trader:
@@ -316,7 +319,7 @@ class Trader:
             MM_SYMBOL[1]: DriftTrader,
 
         }
-        # Loop through returned orders and post them
+
         result, conversions = {}, 0
         for symbol, product_trader in product_traders.items():
             if symbol in state.order_depths:
